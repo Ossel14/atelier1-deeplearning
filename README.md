@@ -1,16 +1,15 @@
-# Atelier 1 - Deep Learning avec PyTorch
 # Atelier 1 — Deep Learning avec PyTorch
 
 **TP : Régression et classification multiclasses avec des réseaux DNN/MLP**  
 **Environnement :** Google Colab (PyTorch, GPU CUDA), pandas, NumPy, scikit-learn, skorch, Matplotlib, Seaborn  
-**État d'avancement :** Partie 1 (régression) réalisée ; Partie 2 (classification) à venir.
+**État d’avancement :** Parties 1 (régression) et 2 (classification multiclasses) réalisées ; résultats expérimentaux documentés ci-dessous.
 
 ## Objectifs
 
 Ce TP vise à mettre en œuvre des réseaux de neurones entièrement connectés (*Multi-Layer Perceptron*, MLP) avec PyTorch pour deux tâches :
 
 1. **Régression :** prédiction d'une valeur continue à partir des données boursières NYSE.
-2. **Classification multiclasses :** prédiction du type de défaillance d'une machine (à réaliser dans la Partie 2).
+2. **Classification multiclasses :** prédiction du type de défaillance d’une machine industrielle.
 
 Les étapes demandées comprennent l'analyse exploratoire des données (EDA), le prétraitement, la construction du modèle, la recherche d'hyperparamètres avec `GridSearchCV`, la visualisation des courbes d'apprentissage, la régularisation et l'évaluation des résultats.
 
@@ -179,30 +178,191 @@ Ce travail m'a permis de :
 - Tester Dropout, weight decay et early stopping, puis comparer leurs résultats à ceux du modèle initial.
 - Comprendre qu'un modèle profond peut obtenir de bonnes métriques tout en restant moins efficace qu'une référence naïve simple.
 
-## Partie 2 — Classification multiclasses (à réaliser)
+## Partie 2 — Classification multiclasses : maintenance prédictive
 
-**Dataset :** [Machine Predictive Maintenance Classification — Kaggle](https://www.kaggle.com/datasets/shivamb/machine-predictive-maintenance-classification)
+### 1. Dataset et objectif
 
-**Objectif envisagé :** prédire la variable multiclasses `Failure Type` à l'aide d'un MLP PyTorch, après nettoyage, encodage et normalisation des données. Les étapes prévues sont l'EDA, le traitement du déséquilibre des classes **sur Train uniquement**, l'optimisation des hyperparamètres, les courbes Loss/Accuracy, la matrice de confusion, l'accuracy, le recall/sensibilité et le F1-score, puis la comparaison avec des variantes régularisées.
+- **Source :** [Machine Predictive Maintenance Classification — Kaggle](https://www.kaggle.com/datasets/shivamb/machine-predictive-maintenance-classification)
+- **Dimensions :** **10 000 lignes × 10 colonnes**.
+- **Cible :** `Failure Type` (six catégories, dont `No Failure`).
+- **Objectif :** prédire le type de panne à partir des paramètres d'une machine industrielle.
 
-*Cette partie n'est pas encore implémentée ; aucun résultat de classification n'est revendiqué à ce stade.*
+Variables utilisées : `Type`, `Air temperature [K]`, `Process temperature [K]`, `Rotational speed [rpm]`, `Torque [Nm]`, `Tool wear [min]`.
 
-## Organisation envisagée du dépôt
+Les colonnes `UDI` et `Product ID` (identifiants) ainsi que `Target` (indicateur binaire de panne qui révélerait une partie de la cible) sont **exclues des entrées**.
+
+### 2. Exploration et qualité des données
+
+L'EDA a montré **0 valeur manquante, 0 ligne dupliquée, 0 doublon dans les identifiants**. La variable `Type` comporte trois modalités (`L`, `M`, `H`).
+
+Les histogrammes révèlent notamment une vitesse de rotation asymétrique vers la droite, un couple approximativement centré autour de 40 Nm et une usure d'outil assez répartie jusqu'à environ 200 min. La matrice de corrélation indique :
+
+- Température air / processus : **+0.88** (corrélation positive forte).
+- Vitesse de rotation / couple : **−0.88** (corrélation négative forte).
+- Usure de l'outil / autres variables numériques : **proche de 0** en corrélation linéaire.
+
+Le boxplot du couple par type de panne montre des niveaux et dispersions différents, notamment un couple plutôt élevé pour `Overstrain Failure` ; les classes rares ont cependant des effectifs insuffisants pour conclure fortement.
+
+**Répartition initiale des classes :**
+
+| Classe | Effectif | Part |
+|---|---:|---:|
+| No Failure | 9 652 | 96,52 % |
+| Heat Dissipation Failure | 112 | 1,12 % |
+| Power Failure | 95 | 0,95 % |
+| Overstrain Failure | 78 | 0,78 % |
+| Tool Wear Failure | 45 | 0,45 % |
+| Random Failures | 18 | 0,18 % |
+| **Total** | **10 000** | **100 %** |
+
+La classe majoritaire représente **96,52 %** des observations : une accuracy élevée peut donc être trompeuse. La métrique prioritaire choisie est le **F1-score macro**, avec analyse du recall par classe.
+
+### 3. Séparation, encodage et standardisation
+
+La séparation `train_test_split(..., stratify=y, random_state=42)` préserve approximativement les proportions de chaque classe :
+
+| Classe | Train | Validation | Test |
+|---|---:|---:|---:|
+| Heat Dissipation Failure | 78 | 17 | 17 |
+| No Failure | 6 756 | 1 448 | 1 448 |
+| Overstrain Failure | 55 | 11 | 12 |
+| Power Failure | 67 | 14 | 14 |
+| Random Failures | 13 | 3 | 2 |
+| Tool Wear Failure | 31 | 7 | 7 |
+| **Total** | **7 000** | **1 500** | **1 500** |
+
+La cible est encodée de 0 à 5 avec `LabelEncoder`. Les cinq variables numériques sont standardisées par `StandardScaler` et `Type` est transformée en trois colonnes par **One-Hot Encoding**. Le `ColumnTransformer` est ajusté **uniquement sur Train** : dimensions finales **(7000, 8)**, **(1500, 8)**, **(1500, 8)** ; les variables numériques du Train ont une moyenne voisine de 0 et un écart-type voisin de 1.
+
+### 4. Augmentation de données avec SMOTENC
+
+Pour traiter le mélange de variables numériques et catégorielles, l'expérience utilise **SMOTENC**, plutôt qu'un SMOTE appliqué directement à des colonnes One-Hot. L'augmentation s'effectue **uniquement sur Train** avec `random_state=42`, `k_neighbors=3`, et un objectif partiel de **500 observations pour chacune des cinq classes de panne** ; la classe `No Failure` demeure inchangée.
+
+| Classe | Train avant | Train après SMOTENC |
+|---|---:|---:|
+| No Failure | 6 756 | 6 756 |
+| Heat Dissipation Failure | 78 | 500 |
+| Power Failure | 67 | 500 |
+| Overstrain Failure | 55 | 500 |
+| Tool Wear Failure | 31 | 500 |
+| Random Failures | 13 | 500 |
+| **Total** | **7 000** | **9 256** |
+
+Les données augmentées sont transformées en **8 entrées `float32`** ; les labels sont de type `int64` pour `CrossEntropyLoss`. **Validation et Test ne sont ni augmentés ni rééquilibrés.** Un SMOTENC partant de seulement **13 cas réels** de `Random Failures` ne garantit pas une diversité de panne représentative.
+
+### 5. Premier MLP PyTorch (baseline)
+
+```text
+8 entrées → Linear(64) → ReLU → Linear(32) → ReLU → Linear(6)
+```
+
+- **Paramètres entraînables :** 2 854.
+- **Loss :** `CrossEntropyLoss` (sortie en *logits*, sans Softmax explicite).
+- **Optimiseur :** Adam, `learning_rate=0.001`.
+- **Batch size :** 64 ; **100 époques** ; entraînement possible sur GPU CUDA.
+- **Entraînement :** 9 256 lignes après SMOTENC ; **validation :** 1 500 lignes non équilibrées.
+
+Les courbes `Loss / Epochs` et `Accuracy / Epochs` montrent une baisse continue de la perte Train, tandis que la perte Validation baisse initialement puis remonte : **signe d'un surapprentissage possible**. En fin d'entraînement, l'accuracy Validation est **0.9587** et le F1 macro **0.5318** ; le maximum du F1 macro observé au cours de l'entraînement est **0.5475**, à l'époque 97, sans restauration de ces poids pour la baseline finale.
+
+### 6. Optimisation avec GridSearchCV
+
+Le réseau PyTorch a été intégré dans un pipeline avec `skorch`, `imblearn.pipeline.Pipeline`, `ColumnTransformer`, `SMOTENC` et une conversion explicite en `float32`. La recherche repart des **7 000 observations Train originales** : à chaque fold, le prétraitement et les exemples synthétiques sont calculés sur **le sous-ensemble d'entraînement du fold uniquement**, afin d'éviter une fuite de données.
+
+- **Validation croisée :** `StratifiedKFold(n_splits=3, shuffle=True, random_state=42)`.
+- **Critère :** `scoring='f1_macro'`.
+- **Recherche :** architectures `(64, 32)` / `(128, 64)` ; learning rates `0.001` / `0.0005` ; Adam / SGD ; 30 / 60 époques ; batch size fixe de 64.
+- **Volume :** 16 configurations × 3 folds = **48 entraînements de validation croisée**, puis réentraînement de la configuration retenue.
+
+**Meilleurs hyperparamètres :** deux couches cachées **128 et 64**, **Adam**, `lr=0.0005`, **60 époques**. **Meilleur F1 macro CV : 0.5751**, moyenne des scores des folds (différent du score sur Validation séparée).
+
+### 7. Régularisation et Early Stopping
+
+Architecture régularisée : `8 → 128 → 64 → 6`, **9 798 paramètres**. Les techniques ont été testées **ensemble** :
+
+- `Dropout(p=0.2)` après chacune des deux couches cachées ;
+- Adam avec `weight_decay=0.0001` et `lr=0.0005` ;
+- `Early Stopping` sur le **F1 macro Validation**, patience **15** époques, `min_delta=0.001`, plafond **150** époques, avec restauration des meilleurs poids.
+
+**Résultat :** arrêt à l'époque **62**, meilleurs poids de l'époque **47**, meilleur **F1 macro Validation = 0.5093**. Les courbes Train/Validation Loss, Accuracy et F1 macro ont été produites. Cette régularisation combinée **n'a pas dépassé** le MLP optimisé ; elle ne permet pas d'isoler l'effet de chaque technique.
+
+### 8. Résultats quantitatifs
+
+#### Validation — 1 500 observations
+
+| Modèle | Accuracy | Precision macro | Recall macro | F1 macro | F1 weighted |
+|---|---:|---:|---:|---:|---:|
+| MLP initial | 0.9587 | 0.5012 | 0.5812 | 0.5318 | 0.9657 |
+| **MLP optimisé** | **0.9640** | **0.5379** | **0.5994** | **0.5565** | **0.9693** |
+| MLP régularisé | 0.9520 | 0.4647 | 0.5854 | 0.5093 | 0.9610 |
+| Majoritaire (`No Failure`) | 0.9653 | 0.1609 | 0.1667 | 0.1637 | 0.9483 |
+
+Sur Validation, l'optimisation augmente le F1 macro de **0.5318 à 0.5565**. Malgré une accuracy légèrement plus élevée, le classificateur majoritaire a un F1 macro très inférieur.
+
+#### Test — 1 500 observations
+
+| Modèle | Accuracy | Precision macro | Recall macro | F1 macro | F1 weighted |
+|---|---:|---:|---:|---:|---:|
+| MLP initial | **0.9687** | **0.5720** | 0.6270 | 0.5924 | **0.9745** |
+| **MLP optimisé** | 0.9673 | 0.5696 | **0.6408** | **0.5968** | 0.9737 |
+| MLP régularisé | 0.9553 | 0.5322 | 0.6406 | 0.5778 | 0.9664 |
+| Majoritaire (`No Failure`) | 0.9653 | 0.1609 | 0.1667 | 0.1637 | 0.9483 |
+
+Le **MLP optimisé** est retenu car le **F1 macro Test le plus élevé parmi les modèles expérimentés est 0.5968**, et il avait aussi été sélectionné sur Validation. Le MLP initial affiche en revanche la meilleure accuracy Test ; cela souligne l'importance du choix de métrique.
+
+#### Rappel par classe — MLP optimisé sur Test
+
+| Classe | Détections correctes | Recall |
+|---|---:|---:|
+| Heat Dissipation Failure | 15 / 17 | 0.8824 |
+| No Failure | 1411 / 1448 | 0.9744 |
+| Overstrain Failure | 11 / 12 | 0.9167 |
+| Power Failure | 13 / 14 | 0.9286 |
+| Random Failures | **0 / 2** | **0.0000** |
+| Tool Wear Failure | **1 / 7** | **0.1429** |
+
+La matrice de confusion fait ressortir une bonne reconnaissance de certaines pannes physiques, mais un **échec pour `Random Failures`** et une **faible détection de `Tool Wear Failure`**. Sur les 1 448 cas `No Failure`, **37** ont été classés comme une panne (10 + 1 + 7 + 19 dans les différentes colonnes de panne). Avec seulement 2 observations Test de `Random Failures`, le recall de cette catégorie n'est pas estimable de façon stable.
+
+### 9. Interprétation et limites — Partie 2
+
+- Les performances sur classes rares sont plus importantes qu'une accuracy globale élevée ; prédire systématiquement `No Failure` atteint déjà **96,53 % d'accuracy** sur Test mais un **F1 macro de 0.1637**.
+- La génération de données avec SMOTENC a permis de former des batches plus riches en pannes, **sans résoudre** la difficulté de certaines classes très rares.
+- GridSearchCV améliore légèrement le F1 macro par rapport au MLP initial, mais l'amélioration sur Test est **modeste** (**0.5924 → 0.5968**).
+- Dropout, weight decay et Early Stopping, testés conjointement, **n'ont pas amélioré** les scores Test dans cette configuration.
+- La comparaison entre scores Train sur données synthétiques et scores Validation sur données naturelles doit être interprétée avec prudence.
+- Le dataset est très déséquilibré et les classes très rares sont trop petites pour tirer des conclusions générales ; les résultats restent pédagogiques et ne constituent pas un système de surveillance industrielle validé.
+
+### 10. Synthèse des apprentissages — Partie 2
+
+Cette expérience m'a appris à : nettoyer et explorer des données industrielles, encoder une cible multiclasses et une variable catégorielle, standardiser les données sans fuite, conserver une séparation stratifiée, utiliser SMOTENC uniquement sur Train, développer une architecture MLP à six sorties avec `CrossEntropyLoss`, suivre Loss/Accuracy/F1 macro, interpréter des matrices de confusion et comparer GridSearchCV avec différentes régularisations. Elle a surtout montré pourquoi une **accuracy élevée peut masquer l'échec sur des classes minoritaires**.
+
+## Synthèse générale du TP
+
+Les deux expériences mettent en évidence la différence entre les objectifs de **régression** et de **classification** et la nécessité d'adapter les métriques au problème : **MAE, RMSE et R²** pour une cible continue ; **precision, recall/sensibilité, F1 et matrice de confusion** pour des classes déséquilibrées. J'ai appris à construire des réseaux PyTorch, exploiter les GPU Colab, paramétrer leurs entraînements, utiliser `GridSearchCV` avec une validation adaptée, prévenir les fuites de données et comparer un réseau profond à des références simples.
+
+**Conclusion :** davantage de neurones, des hyperparamètres optimisés ou de la régularisation ne garantissent pas automatiquement de meilleurs résultats. Un bon protocole expérimental, des métriques pertinentes, des bases de comparaison et une analyse des erreurs sont indispensables.
+
+## Organisation du dépôt
 
 ```text
 atelier1-deeplearning/
 ├── README.md
 └── notebooks/
     ├── 01_regression_nyse.ipynb
-    └── 02_classification_maintenance.ipynb  # à venir
+    └── 02_classification_maintenance.ipynb
 ```
 
-## Exécution
+*Cette arborescence représente l'organisation cible ; vérifier les chemins réels des notebooks dans le dépôt.*
 
-1. Ouvrir le notebook de régression dans **Google Colab**.
-2. Exécuter les cellules dans l'ordre ; le notebook utilise `kagglehub` pour récupérer le dataset NYSE.
-3. Installer au besoin les dépendances utilisées dans les cellules (dont `skorch`).
-4. Sélectionner un runtime GPU CUDA si disponible ; le modèle peut également être exécuté sur CPU.
-5. Recalculer les entraînements pour reproduire les graphiques et les métriques. Les résultats peuvent légèrement varier selon la session, les graines aléatoires et les versions logicielles.
+## Exécution sur Google Colab
 
-**Remarque :** les fichiers de datasets et les modèles entraînés ne sont pas inclus dans ce README. Les valeurs ci-dessus proviennent des sorties obtenues durant le TP.
+1. Ouvrir `01_regression_nyse.ipynb` ou `02_classification_maintenance.ipynb` dans Google Colab.
+2. Sélectionner **Exécution → Modifier le type d'exécution → T4 GPU**, si disponible (le CPU reste possible).
+3. Exécuter les cellules dans l'ordre. Le téléchargement des fichiers Kaggle est automatisé avec `kagglehub`.
+4. Installer les bibliothèques utilisées au besoin : `torch`, `pandas`, `numpy`, `matplotlib`, `seaborn`, `scikit-learn`, `imbalanced-learn`, `skorch`, `kagglehub`.
+5. Conserver les cellules de prétraitement, d'équilibrage et d'entraînement dans leur ordre : une session Colab réinitialisée ne garde **pas** les variables et modèles Python en mémoire.
+
+**Versions relevées durant la Partie 2 :** `scikit-learn 1.6.1`, `imbalanced-learn 0.14.2`, `skorch 1.4.0`. Les résultats dépendent des versions, du GPU et des sources de hasard ; ils peuvent légèrement varier lors d'une nouvelle exécution. Les tableaux présentent les **résultats effectivement observés** pendant le TP, sans inventer de performances non mesurées.
+
+## Sources des datasets
+
+- [NYSE — Kaggle (dgawlik/nyse)](https://www.kaggle.com/datasets/dgawlik/nyse)
+- [Machine Predictive Maintenance Classification — Kaggle (shivamb)](https://www.kaggle.com/datasets/shivamb/machine-predictive-maintenance-classification)
